@@ -20,6 +20,9 @@ val pem_of_string : string -> X509.Certificate.t
 
 val pp_hash : Cstruct.t -> string
 
+val pp_fingerprint :
+  hash_type:Mirage_crypto.Hash.hash -> X509.Certificate.t -> string
+
 val validate_name : t_trusted -> string -> unit
 
 val hostnames_of_pem_cert :
@@ -80,4 +83,6 @@ module Db_util : sig
     -> API.ref_Certificate list
 
   val get_ca_certs : __context:Context.t -> API.ref_Certificate list
+
+  val upgrade_ca_fingerprints : __context:Context.t -> unit
 end

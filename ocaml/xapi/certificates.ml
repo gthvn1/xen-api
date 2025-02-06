@@ -80,6 +80,9 @@ let pp_hash hash =
   in
   String.init length value_of
 
+let pp_fingerprint ~hash_type cert =
+  X509.Certificate.fingerprint hash_type cert |> pp_hash
+
 let safe_char c =
   match c with
   | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '.' | '_' | '-' ->
@@ -172,6 +175,8 @@ module Db_util : sig
     * of type [type'] belonging to [host] (the term 'host' is overloaded here) *)
 
   val get_ca_certs : __context:Context.t -> API.ref_Certificate list
+
+  val upgrade_ca_fingerprints : __context:Context.t -> unit
 end = struct
   module Date = Xapi_stdext_date.Date
 
@@ -218,12 +223,8 @@ end = struct
     let not_before, not_after =
       dates_of_ptimes (X509.Certificate.validity certificate)
     in
-    let fingerprint_sha256 =
-      X509.Certificate.fingerprint `SHA256 certificate |> pp_hash
-    in
-    let fingerprint_sha1 =
-      X509.Certificate.fingerprint `SHA1 certificate |> pp_hash
-    in
+    let fingerprint_sha256 = pp_fingerprint ~hash_type:`SHA256 certificate in
+    let fingerprint_sha1 = pp_fingerprint ~hash_type:`SHA1 certificate in
     let uuid = Uuidx.(to_string (make ())) in
     let ref' = Ref.make () in
     Db.Certificate.create ~__context ~ref:ref' ~uuid ~host ~not_before
@@ -259,6 +260,54 @@ end = struct
       Eq (Field "type", Literal "ca")
     in
     Db.Certificate.get_refs_where ~__context ~expr
+
+  let upgrade_ca_fingerprints ~__context =
+    let __FUN = __FUNCTION__ in
+    let expr =
+      let open Xapi_database.Db_filter_types in
+      And
+        ( Or
+            ( Eq (Field "fingerprint_sha256", Literal "")
+            , Eq (Field "fingerprint_sha1", Literal "")
+            )
+        , Eq (Field "type", Literal "ca")
+        )
+    in
+    let empty = Db.Certificate.get_records_where ~__context ~expr in
+    List.iter
+      (fun (self, record) ->
+        let read_fingerprints filename =
+          let ( let* ) = Result.bind in
+          try
+            let* certificate =
+              Xapi_stdext_unix.Unixext.string_of_file filename
+              |> Cstruct.of_string
+              |> X509.Certificate.decode_pem
+            in
+            let sha1 = pp_fingerprint ~hash_type:`SHA1 certificate in
+            let sha256 = pp_fingerprint ~hash_type:`SHA256 certificate in
+            Ok (sha1, sha256)
+          with
+          | Unix.Unix_error (Unix.ENOENT, _, _) ->
+              Error
+                (`Msg (Printf.sprintf "filename %s does not exist" filename))
+          | exn ->
+              Error (`Msg (Printexc.to_string exn))
+        in
+        let filename =
+          Filename.concat
+            !Xapi_globs.trusted_certs_dir
+            record.API.certificate_name
+        in
+        match read_fingerprints filename with
+        | Ok (sha1, sha256) ->
+            Db.Certificate.set_fingerprint_sha1 ~__context ~self ~value:sha1 ;
+            Db.Certificate.set_fingerprint_sha256 ~__context ~self ~value:sha256
+        | Error (`Msg msg) ->
+            D.info "%s: ignoring error when reading CA certificate %s: %s" __FUN
+              record.API.certificate_name msg
+      )
+      empty
 end
 
 let local_list kind =
